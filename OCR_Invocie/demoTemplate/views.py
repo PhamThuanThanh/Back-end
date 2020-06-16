@@ -3,21 +3,199 @@ from django.shortcuts import render
 from django.http import JsonResponse
 from django.core import serializers
 import re
+import os
+import sys
+from .loader import chooseInput
+from django.contrib.auth import authenticate
+from .models import Auth
+from .models import Customer
+from  .models import Invoice
+from uuid import uuid4
+from datetime import datetime
+import time
+import smtplib
+from django.core.mail import send_mail
+from django.utils.html import strip_tags
+from django.conf import settings
+from django.template.loader import render_to_string
+
+
+
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/home/totoro0098/Documents/OCR_Invoice/OCR_Invocie/weighty-opus-271403-21af4d24b84b.json"
 
 
 # Create your views here.
 def index(request):
-    filename = 'OCR_Invocie/demoTemplate/templates/test_1.jpg'
-    res = detect_text(filename)
-    return JsonResponse(str(res), content_type="application/json", safe=False)
+    if request.method == "POST" and request.FILES['file']:
+        customer_id = request.POST['customerId']
+        rotate = request.POST['rotate']
+        number = rotate_image(rotate)
+        myfile = request.FILES['file']
+        fs = FileSystemStorage()
+        afilename = fs.save(myfile.name, myfile)
+        filename = '/home/totoro0098/Documents/OCR_Invoice/OCR_Invocie/file/' + afilename
 
+        if number != -1:
+            filename = chooseInput(number, filename)
+        res = detect_text_Okono(filename)
+        print("*******")
+        print(res)
+        if Customer.objects.get(id_customer=customer_id) == "":
+            return JsonResponse({"Status": "Fail"})
+        else:
+            if res.get('total') != "" and res.get('invoice number') != "":
+                save_invoice(customer_id, res.get('invoice number'),res.get('total'), res.get('date'))
+                return JsonResponse(str(res), content_type="application/json", safe=False)
+            else:
+                return JsonResponse({"Status": "Fail", "Error": "Cant not read image"})
+    return JsonResponse({"Status": "Fail"})
 
 #image to text GG Cloud Vision
 
+
+def login(request):
+    if request.method == "POST":
+        data = request.POST.copy()
+        user = authenticate(username=data['username'], password=data['password'])
+        if user is not None:
+            rand_token = uuid4()
+            response = JsonResponse({'data': rand_token,
+                                     'username': data['username']})
+            list_auth = list(Auth.objects.values())
+            for auth in list_auth:
+                if auth['username'] == data['username']:
+                    a = Auth.objects.get(id=auth['id'])
+                    a.delete()
+            auth = Auth()
+            auth.token = rand_token
+            auth.username = data['username']
+            auth.save()
+            return response
+            # A backend authenticated the credentials
+        else:
+            return JsonResponse({'data': 'Fail'})
+            # No backend authenticated the credentials
+    return JsonResponse({"data": 'Login'})
+
+def logout(request):
+    if request.method == "GET":
+        token = request.headers.get('Authorization')
+        list_auth = list(Auth.objects.values())
+        for auth in list_auth:
+            if auth['token'] ==  token:
+                a = Auth.objects.get(id = auth['id'])
+                a.delete()
+    return JsonResponse({'data':'Logout'})
+
+def sign(request):
+    d = datetime.now()
+    id = str(time.mktime(d.timetuple())).replace(".0", "")
+
+    if request.method == "POST":
+        data = request.POST.copy()
+        customer = Customer()
+        customer.full_name = data['fullname']
+        customer.email = data['email']
+        customer.phone = data['phone']
+        customer.birthday = data['birthday']
+        customer.gender = data['gender']
+        customer.id_customer = 'OKONO-' + id
+        customer.save()
+
+        sendEmail(customer.email, customer.full_name, customer.id_customer)
+        return JsonResponse({'data': 'SUCCESS'})
+
+    else:
+        return JsonResponse({"data": 'Fail'})
+
+def sendEmail(email, name, customerID):
+    if email != '':
+        to = [email]
+        subject = 'Email from Okono'
+        body = """
+        Hi {}.
+        Thanks for sending your invoice!
+        This is your ID Customer: 
+                {} 
+        """.format(name, customerID)
+        print(body)
+        try:
+            send_mail(subject, body,settings.EMAIL_HOST_USER, to)
+        except:
+            print(sys.exc_info()[0])
+            print('Something went wrong...')
+    else:
+        print("No email")
+    return JsonResponse({"Data": "Success"})
+
+def save_invoice(customerID, id_invoice, total_invoice, date_invoice,):
+    if Customer.objects.filter(id_customer = customerID):
+        invoice = Invoice()
+
+        invoice.id_customer = customerID
+        invoice.id_invoice = id_invoice
+        invoice.total_invocie = total_invoice
+        invoice.date_invoice = date_invoice
+        invoice.save()
+
+        return True
+    else:
+        return False
+
+def get_invocie_paging(request):
+    if request.method == "GET":
+        currentPage = request.GET.get['currentPage']
+        limit = 10
+        customerID = request.GET.get['customerID']
+        if currentPage <= 0 or currentPage == "":
+            currentPage = 0
+        totalData = Invoice.objects.filter(id_customer = customerID).values()
+        print(len(totalData))
+        listRecord = []
+        for record in range((currentPage * limit), ((currentPage + 1) * limit)):
+            if record >= len(totalData):
+                break
+            else:
+                listRecord.append(totalData[record])
+
+        return listRecord
+    return
+
+def listInvoices(request):
+    if request.method == "GET" :
+        username = ''
+        data = ''
+        token = request.headers.get('Authorization')
+        list_auth = list(Auth.objects.values())
+        for auth in list_auth:
+            if auth['token'] ==  token:
+                username = auth['username']
+        if username != '':
+            data =  list(Invoice.objects.values())
+        return JsonResponse({'data': data,'username': username})
+
+def listCustomer(request):
+    if request.method == "GET" :
+        username = ''
+        data = ''
+        token = request.headers.get('Authorization')
+        list_auth = list(Auth.objects.values())
+        for auth in list_auth:
+            if auth['token'] ==  token:
+                username = auth['username']
+        if username != '':
+            data =  list(Customer.objects.values())
+        print(data)
+        return JsonResponse({'data': data,'username': username})
+
+
+
 from google.cloud import vision
 import io
+from google.protobuf import json_format
 
 def detect_text(path):
+    print(path)
     client = vision.ImageAnnotatorClient()
 
     with io.open(path, 'rb') as image_file:
@@ -29,161 +207,144 @@ def detect_text(path):
     texts = response.text_annotations
 
     print('Texts:')
+    listDescription = []
+    listVertices = []
+    verticetotal = []
+    total = ""
+    unit = ""
+
+
     for text in texts:
-        print('\n"{}"'.format(text.description))
-        vertices = (['({},{})'.format(vertex.x, vertex.y)
-                    for vertex in text.bounding_poly.vertices])
-        print('bounds: {}'.format(','.join(vertices)))
+        # print('\n"{}"'.format(text.description))
+        # vertices = ([(vertex.x, vertex.y)
+        #             for vertex in text.bounding_poly.vertices])
+
+        vertices = ([(vertex.y)
+                     for vertex in text.bounding_poly.vertices])
+        # regex total
+        pattern = re.compile("total")
+        if (pattern.search(text.description.lower())):
+            verticetotal = vertices
+        else:
+            listVertices.append((vertices))
+            listDescription.append(text.description)
+        # print('bounds: {}'.format(','.join(vertices)))
+
+    for i in range(len(listVertices)):
+        # print(listVertices[i])
+        for check in range(len(verticetotal)):
+            if abs(verticetotal[check] - listVertices[i][check]) <= 10:
+                if is_number(listDescription[i]):
+                    total += str(listDescription[i])
+                elif listDescription[i] != ":":
+                    if extractNumber(listDescription[i]):
+                        total += extractNumber(listDescription[i])
+                        unit += re.sub(extractNumber(listDescription[i]),  '',    listDescription[i])
+                    else:
+                        unit += str(listDescription[i])
+                break
 
     if response.error.message:
         raise Exception(
             '{}\nFor more info on error messages, check: '
             'https://cloud.google.com/apis/design/errors'.format(
                 response.error.message))
-    return format(texts[0].description)
-
-
-#PDF to text
-
-from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
-from pdfminer.converter import TextConverter
-from pdfminer.layout import LAParams
-from pdfminer.pdfpage import PDFPage
-from io import StringIO
-
-
-def convert_pdf_to_txt(filename):
-    path = '/home/totoro0098/PycharmProjects/OCR/OCR_Invocie/demoTemplate/templates/' + filename
-    rsrcmgr = PDFResourceManager()
-    retstr = StringIO()
-    laparams = LAParams()
-    device = TextConverter(rsrcmgr, retstr, laparams=laparams)
-    fp = open(path, 'rb')
-    interpreter = PDFPageInterpreter(rsrcmgr, device)
-    password = ""
-    maxpages = 0
-    caching = True
-    pagenos = set()
-
-    for page in PDFPage.get_pages(fp, pagenos, maxpages=maxpages, password=password, caching=caching,
-                                  check_extractable=True):
-        interpreter.process_page(page)
-
-    text = retstr.getvalue()
-    print("==============")
-    print(text)
-    fp.close()
-    device.close()
-    retstr.close()
-    return text
-
-from pdfminer.layout import LAParams, LTTextBox
-from pdfminer.pdfpage import PDFPage
-from pdfminer.pdfinterp import PDFResourceManager
-from pdfminer.pdfinterp import PDFPageInterpreter
-from pdfminer.converter import PDFPageAggregator
-import re
-
-
-def read_pdf(filename):
-    path = '/home/totoro0098/PycharmProjects/OCR/OCR_Invocie/demoTemplate/templates/' + filename
-    fp = open(path, 'rb')
-    # fp = open('AmazonWebServices.pdf', 'rb')
-    # fp = open('/templates/hr_phuong.pdf', 'rb')
-
-    rsrcmgr = PDFResourceManager()
-
-    laparams = LAParams()
-    device = PDFPageAggregator(rsrcmgr, laparams=laparams)
-    interpreter = PDFPageInterpreter(rsrcmgr, device)
-    pages = PDFPage.get_pages(fp)
-
-    data = ""
-    for page in pages:
-        print('Processing next page...')
-        interpreter.process_page(page)
-        layout = device.get_result()
-        for lobj in layout:
-            if isinstance(lobj, LTTextBox):
-                x, y, text = lobj.bbox[0], lobj.bbox[3], lobj.get_text()
-                a = re.findall(r'((\w*[\\\/\n:+ .!@#$%^&*()_+=<>,?;"' r"'{[}\]\|-]*)*)", text)
-                b = " ".join(map(str, list(map(''.join, a))))
-                data += b
-    return data
-
-
-def getFirstData(t):
-    return t[0]
-
-
-def takeSecond(elem):
-    return elem[1]
-
+    # return format(texts[0].description)
+    print(total)
+    print(unit)
+    return {'total': total, 'unit': unit}
 #
-# def getTemp(data):
-#     arrTemp = []
-#     for num, i in enumerate(data, start=0):
-#         a = i.lower().strip()
-#         if a in TEMPLATE_INFORMATION:
-#             arrTemp.append(("information", num))
-#         elif a in TEMPLATE_SUMMARY:
-#             arrTemp.append(("summary", num))
-#         elif a in TEMPLATE_SKILLS:
-#             arrTemp.append(("skills", num))
-#         elif a in TEMPLATE_EXPERIENCE:
-#             arrTemp.append(("experience", num))
-#         elif a in TEMPLATE_EDUCATION:
-#             arrTemp.append(("education", num))
-#         elif a in TEMPLATE_AWARDS:
-#             arrTemp.append(("awards", num))
-#         elif a in TEMPLATE_REFERENCES:
-#             arrTemp.append(("references", num))
-#         elif a in TEMPLATE_INTERESTS:
-#             arrTemp.append(("interests", num))
-#     if (arrTemp[0][0] != "information" and arrTemp[0][1] != 0):
-#         arrTemp.append(("information", 0))
-#     arrTemp.sort(key=takeSecond)
-#     return arrTemp
-#
-#
-# def getInfor(data, start, end):
-#     paragraphData = "".join(data[start:end])
-#     print(paragraphData)
-#     list_name = re.findall(
-#         r"((([ ]*[A-Z_ÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚĂĐĨŨƠƯĂẠẢẤẦẨẪẬÂẮẰẲẴẶẸẺẼỀỀỂỄỆỈỊỌỎỐỒỔỖỘỚỜỞỠỢỤỦỨỪỬỮỰỲỴÝỶỸ]{2,})+)+|([ ]*[A-Z][a-z_àáâãèéêìíòóôõùúăđĩũơưăạảấầẩẫậắằẳâấầẫậẵặẹẻẽềềểễệỉịọỏốồổỗộớờởỡợụủứừỬỮỰỲỴÝỶỸửữựỳỵỷỹ]+)+)",
-#         paragraphData)
-#     list_phone = re.findall(r'(\d{10})', paragraphData)
-#     list_email = re.findall(r'(\w+@(gmail.com|yahoo.com|vnu.edu.vn))', paragraphData)
-#     # print("------------------")
-#     # print(list_name)
-#     # print(list_phone)
-#     # print(list_email)
-#     if list(map(getFirstData, list_name)):
-#         name = list(map(getFirstData, list_name))[0]
-#     else:
-#         name = "No Name"
-#     if list(list_phone):
-#         phone = list(list_phone)[0]
-#     else:
-#         phone = "No Phone"
-#     if list(map(getFirstData, list_email)):
-#         email = list(map(getFirstData, list_email))[0]
-#     else:
-#         email = "No Email"
-#     data = {
-#         "Name": name,
-#         "Phone": phone,
-#         "Email": email
-#     }
-#     return data
-#
-#
-# def getSkills(data, start, end):
-#     paragraphData = " ".join(data[start:end])
-#     skills_1 = []
-#     skills_2 = []
-#     for i in LIST_SKILLS_1:
-#         if i in paragraphData: skills_1.append(i)
-#     # for i in LIST_SKILLS_2:
-#     #   if i in paragraphData: skills_2.append(i)
-#     return {"skills_1": skills_1}
+
+def detect_text_Okono(path):
+    print(path)
+    client = vision.ImageAnnotatorClient()
+
+    with io.open(path, 'rb') as image_file:
+        content = image_file.read()
+
+    image = vision.types.Image(content=content)
+
+    response = client.text_detection(image=image)
+    texts = response.text_annotations
+
+    print('Texts:')
+    total = ""
+    invoice_number = ""
+    date = ""
+
+    for key, value in enumerate(texts):
+        print('\n"{}"'.format(value.description))
+
+        pattern_number = re.compile("số")
+        if (pattern_number.search(value.description.lower()) and key != 0):
+            if texts[key+1].description != "Ngày":
+                invoice_number = texts[key + 1].description
+                print(invoice_number)
+            else:
+                invoice_number = value.description.replace("SỐ:", "")
+
+
+
+        pattern_date = re.compile("ngày")
+        if (pattern_date.search(value.description.lower()) and key != 0):
+            date = texts[key + 1].description
+            print(date)
+
+        pattern_total = re.compile("tổng")
+        pattern_toan = re.compile("toán")
+        partern_tien = re.compile("ti")
+
+        if (pattern_total.search(value.description.lower()) and key != 0):
+            print(texts[key + 3].description.lower())
+            if partern_tien.search(texts[key+1].description) and texts[key+2].description == "thanh" and pattern_toan.search(texts[key+3].description.lower()):
+                total = texts[key + 4].description
+            print(total)
+
+
+    if response.error.message:
+        raise Exception(
+            '{}\nFor more info on error messages, check: '
+            'https://cloud.google.com/apis/design/errors'.format(
+                response.error.message))
+    # return format(texts[0].description)
+    date = date.replace("/", "-")
+    return {'invoice number': invoice_number, 'total': total, 'date': date}
+
+# def get_number_invoice()
+def is_number(s):
+
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+def extractNumber(s):
+    number = ""
+    for i in range(len(s)):
+        if s[i].isdigit() or s[i] == "." or s[i] == ",":
+            number += s[i]
+    return number
+
+def rotate_image(rotate):
+    rotate = int(rotate)
+    number = -1
+    if rotate <= 45 and rotate >= 20:
+        number = 3
+    elif rotate >0 and rotate < 20:
+        number = 2
+    elif rotate >=315 and rotate <= 340:
+        number = 0
+    elif rotate > 340 and rotate < 360:
+        number = 1
+    return number
+
+    # def save_information(customerId, total, unit):
+    #
+    #     customer.id_customer = customerId
+    #     customer.total_invocie = total
+    #     customer.name_customer = "Thanh"
+    #     customer.unit_invoce = unit
+    #     customer.date = datetime.now()
+    #     customer.save()
+    #     return True
+
